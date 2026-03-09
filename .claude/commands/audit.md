@@ -2,24 +2,47 @@ Perform a comprehensive security audit of a dstack/Phala TEE application.
 
 Arguments: $ARGUMENTS
 
-Parse the arguments from $ARGUMENTS. Expect one or two inputs:
-- If two: first is a GitHub repo URL, second is the Phala Cloud app URL
-- If one: a GitHub repo URL (skip live attestation checks)
+Parse the arguments from $ARGUMENTS. The user may provide any combination of:
+- A **GitHub repo URL** (required) — the source code to audit
+- A **deployment URL** — could be a Phala Cloud gateway URL, a custom domain, or any endpoint
+- An **attestation source** — could be:
+  - A Phala Cloud 8090 URL (e.g., `https://{app_id}-8090.{cluster}.phala.network/`)
+  - A Trust Center URL (e.g., `https://trust.phala.com/app/{app_id}`)
+  - A Phala Cloud API URL (e.g., `https://cloud-api.phala.network/api/v1/apps/{app_id}/attestations`)
+  - A local file path containing attestation JSON or 8090 HTML
+  - An app's `/attestation` endpoint
+  - Nothing — the user may not have attestation data yet
+
+If only a repo URL is given, do code-only analysis. If the user provides additional URLs or files, use them.
 
 ## Phase 1: Gather Deployment Data
 
-If a Phala Cloud URL was provided:
-1. Parse the URL to extract app_id and cluster
-2. Fetch the 8090 metadata endpoint: `curl -s "https://{app_id}-8090.{cluster}.phala.network/"`
-3. Extract and read the `app_compose` JSON — this contains:
-   - `docker_compose_file` (the actual deployed compose)
-   - `allowed_envs` (operator-injectable env vars)
-   - `kms_enabled`
-   - `pre_launch_script`
-4. Check if TDX quote is present (empty = --dev-os, no hardware attestation)
-5. Try fetching `/attestation` from the app URL for TLS binding data
+Try to collect attestation and deployment data from whatever sources are available. Adapt to what works:
 
-Record: app_id, compose_hash, docker images, allowed_envs, KMS type, TDX quote status.
+### Option A: Phala Cloud gateway URL provided
+1. Parse `https://{app_id}-{port}[s].{cluster}.phala.network/` to extract app_id and cluster
+2. Try the 8090 metadata endpoint: `curl -s "https://{app_id}-8090.{cluster}.phala.network/"`
+3. If 8090 fails, try the Phala Cloud API: `curl -s "https://cloud-api.phala.network/api/v1/apps/{app_id}/attestations"`
+4. Try the app's own `/attestation` endpoint for TLS binding data
+
+### Option B: Custom domain provided
+1. Look up `_dstack-app-address` DNS TXT record to find the Phala gateway URL
+2. Then follow Option A
+
+### Option C: Attestation data provided directly
+1. If the user provides a Trust Center URL, Cloud API URL, local file, or pastes attestation JSON, use that
+2. Extract what you can: app_compose, compose_hash, TDX quote, allowed_envs
+
+### Option D: No deployment data
+1. Do code-only analysis (Phase 2)
+2. Note which checks couldn't be performed without live data
+
+From whatever source, try to extract:
+- `app_compose` JSON (contains `docker_compose_file`, `allowed_envs`, `kms_enabled`, `pre_launch_script`)
+- Compose hash
+- TDX quote presence and content
+- TLS certificate fingerprint and attested fingerprint
+- Docker image references from the deployed compose
 
 ## Phase 2: Clone and Analyze the Source Code
 
