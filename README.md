@@ -1,68 +1,83 @@
 # is-this-real-tea
 
-Automated security audit tool for [dstack](https://github.com/Dstack-TEE/dstack) TEE applications. Give it a GitHub repo and a Phala Cloud URL, get back whether the app is safe to interact with.
+Security audit tool for [dstack](https://github.com/Dstack-TEE/dstack) TEE applications. Give it a GitHub repo and a Phala Cloud URL, get back a detailed analysis of attestation, TLS binding, DevProofness, and code security.
 
-```bash
-python -m dstack_audit https://github.com/sangaline/tee-totalled \
-  https://4e0b5429671d8f90198c806f93e3c0a483f64cff-3000.dstack-pha-prod7.phala.network/
+## Two layers
+
+### 1. `/audit` — Claude Code skill (the main thing)
+
+```
+/audit https://github.com/sangaline/tee-totalled https://4e0b5429671d8f90198c806f93e3c0a483f64cff-3000.dstack-pha-prod7.phala.network/
 ```
 
-## What it does
+Claude clones the repo, reads the actual source code, fetches live attestation data, and produces a structured audit report covering:
 
-A 6-phase pipeline that checks whether a dstack TEE app is **DevProof** (ERC-733 Stage 1) or **Ruggable** (Stage 0):
+- **Configuration Control** — traces every external URL to determine if user data can be exfiltrated by a malicious operator
+- **Attestation & TLS** — checks TDX quote presence, signing key binding, certificate fingerprint matching
+- **Build Reproducibility** — pinned images, SOURCE_DATE_EPOCH, lockfiles, CI pipeline
+- **Data Flow & Storage** — maps how user data moves through the system, what gets persisted, encryption at rest
+- **On-chain / KMS** — AppAuth contracts, upgrade timelocks, compose hash transparency
+- **Stage Assessment** — ERC-733 classification with full checklist
 
-| Phase | What it checks |
-|-------|---------------|
-| 1. URL Parse | Extracts app_id, cluster, port from Phala Cloud URL |
-| 2. Attestation | Fetches 8090 endpoint, extracts app_compose, checks for TDX quote |
-| 3. TLS Binding | Verifies certificate fingerprint matches TEE attestation |
-| 4. Code Analysis | Clones repo, greps 30+ patterns across 7 vulnerability categories |
-| 5. Cross-Reference | Compares deployed compose vs source, flags exfiltration vectors |
-| 6. Stage Assessment | Applies ERC-733 checklist to determine Stage 0 or 1 |
+Each finding includes the actual vulnerable code with file:line references, a step-by-step attack vector, and specific fix recommendations.
 
-### Stage 0 (Ruggable) — any one of:
-- No TDX quote (--dev-os)
-- Pha KMS without on-chain AppAuth
-- Mutable image tags (no `@sha256:` pinning)
-- Configurable URLs that can exfiltrate user data
-- No upgrade timelock
-
-### Stage 1 (DevProof) — requires all of:
-- On-chain KMS with AppAuth contract
-- Pinned image digests
-- Timelock on upgrades
-- No configurable exfiltration vectors
-- TLS binding verified
-- Reproducible builds
-
-## Usage
-
-### CLI
+### 2. `dstack_audit` — Python CLI (automated scanner)
 
 ```bash
-# Basic audit
-python -m dstack_audit <repo_url> <website_url>
-
-# Verbose (progress to stderr)
 python -m dstack_audit <repo_url> <website_url> -v
-
-# Save report to file
-python -m dstack_audit <repo_url> <website_url> -o report.md
 ```
 
-### Claude Code slash command
+Quick automated scan that greps 30+ patterns across 7 categories. Useful as a starting point, but the `/audit` skill produces much richer analysis by actually reading and understanding the code.
 
-Copy `audit.md` to `.claude/commands/audit.md` in your project, then:
+## Setup
 
+Copy this repo's `.claude/commands/audit.md` into your project's `.claude/commands/` to get the `/audit` command.
+
+Or clone this repo and run the Python tool directly:
+
+```bash
+git clone https://github.com/sxysun/is-this-real-tea
+cd is-this-real-tea
+python -m dstack_audit <repo_url> <website_url> -v
 ```
-/audit https://github.com/org/repo https://appid-3000.cluster.phala.network/
+
+## What the audit covers
+
+### Configuration Control (most critical)
+
+The core question: **can the operator exfiltrate user data?**
+
+TEE protects against cloud providers, but operators control `allowed_envs` — environment variables injected at runtime without changing the compose hash. If a URL handling user data is configurable via env, the operator can redirect it to their own server.
+
+```yaml
+# VULNERABLE: operator sets LLM_BASE_URL to capture all prompts
+environment:
+  - LLM_BASE_URL=${LLM_BASE_URL}
+
+# SAFE: hardcoded, operator can't change it
+environment:
+  - LLM_BASE_URL=https://api.redpill.ai/v1
 ```
 
-Claude will run the audit, interpret the report, explain attack vectors, and give a verdict.
+### Attestation & TLS
+
+- Is there a TDX hardware quote? (empty = --dev-os, no TEE guarantees)
+- Is the signing key cryptographically bound to the quote's report_data?
+- Does the TLS certificate fingerprint match the attested fingerprint?
+- Gateway-terminated vs TLS passthrough (end-to-end)
+
+### ERC-733 Stage Assessment
+
+| Stage | Name | Meaning |
+|-------|------|---------|
+| 0 | Ruggable | Developer can push updates or exfiltrate data without notice |
+| 1 | DevProof | Upgrade transparency, no exfiltration vectors, reproducible builds |
+| 2 | Decentralized | No single party controls upgrades |
+| 3 | Trustless | Cryptographic multi-vendor verification |
 
 ## Dependencies
 
-**Core:** Python 3.10+ stdlib only (`urllib`, `json`, `hashlib`, `re`, `subprocess`, `ssl`, `socket`)
+**Core:** Python 3.10+ stdlib only (no pip dependencies)
 
 **Optional:** `dcap-qvl-cli` for TDX quote hardware verification
 
@@ -71,33 +86,25 @@ Claude will run the audit, interpret the report, explain attack vectors, and giv
 ## Tests
 
 ```bash
-# Run all cached tests (no network required)
-pytest tests/ -v
-
-# Run live tests against real Phala Cloud endpoints
-pytest tests/ -v --run-live
+pytest tests/ -v              # 52 cached tests, no network
+pytest tests/ -v --run-live   # live tests against Phala Cloud
 ```
 
-## Code analysis categories
+## References
 
-The grep-based scanner checks 7 categories (patterns in `dstack_audit/patterns/search_patterns.json`):
-
-1. **Configurable URLs** — `${..._URL}`, `LLM_BASE_URL`, `API_URL` in compose/env
-2. **External network calls** — outbound HTTP, WebSocket, DNS
-3. **Attestation code** — quote verification, TappdClient usage
-4. **Red flags** — HACK comments, verification bypasses, dev fallbacks, eval/exec
-5. **Build reproducibility** — pinned digests, SOURCE_DATE_EPOCH, lockfiles
-6. **Secrets/storage** — KMS usage, secret env vars, encryption code
-7. **Smart contracts** — AppAuth interaction, contract addresses, on-chain libraries
+- `references/STAGE-1-CHECKLIST.md` — full ERC-733 Stage 1 requirements with verification commands
+- `references/checklist.md` — comprehensive audit checklist (7 sections, 50+ items)
+- `references/report-template.md` — structured report template
+- `references/erc733-summary.md` — ERC-733 overview
 
 ## Case studies
 
 Tested against apps from [devproof-audits-guide](https://github.com/amiller/devproof-audits-guide):
 
-| App | Expected Stage | Key Finding |
-|-----|---------------|-------------|
+| App | Stage | Key Finding |
+|-----|-------|-------------|
 | hermes | 0 | Pha KMS, mutable image tags |
 | tee-totalled | 0 | `LLM_BASE_URL` configurable (exfiltration) |
-| tokscope-xordi | 0 | `${VAR}` image refs, configurable URLs |
-| xordi-toy-example | 0/1 | Reference implementation |
-| firecrawl | 0 | No TDX quote (--dev-os) |
+| tokscope-xordi | 0 | `${VAR}` image refs, configurable URLs, best repro builds |
+| xordi-toy-example | 1 | Reference implementation with Base KMS |
+| firecrawl | 0 | No TDX quote (--dev-os), massive URL surface |
