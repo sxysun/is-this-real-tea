@@ -1,39 +1,84 @@
 # is-this-real-tea
 
-Security audit tool for [dstack](https://github.com/Dstack-TEE/dstack) TEE applications. Give it a GitHub repo and a Phala Cloud URL, get back a detailed analysis of attestation, TLS binding, DevProofness, and code security.
+Verify whether a [dstack](https://github.com/Dstack-TEE/dstack) TEE application is safe to interact with. Give it a GitHub repo (and optionally a deployment URL), get back a structured security audit.
 
-## Two layers
+---
 
-### 1. `/audit` — Claude Code skill (the main thing)
+## For users
 
+Tell your AI agent:
+
+> Read https://raw.githubusercontent.com/sxysun/is-this-real-tea/main/AGENT.md and then audit this TEE app: `<github_repo_url>` deployed at `<website_url>`
+
+That's it. The agent will know what to do.
+
+---
+
+## What gets checked
+
+| Area | Core Question |
+|------|--------------|
+| **Configuration Control** | Can the operator redirect user data to their own server? |
+| **Attestation & TLS** | Is there a TDX hardware quote? Is the signing key bound to it? |
+| **Build Reproducibility** | Can you rebuild the exact same image from source? |
+| **Data Flow** | Where does user data go? What leaves the TEE boundary? |
+| **On-chain / KMS** | Are upgrades transparent? Is there a timelock? |
+
+The output is an [ERC-733](https://draftv4.erc733.org) stage assessment:
+
+| Stage | Name | What it means |
+|-------|------|---------------|
+| 0 | Ruggable | Operator can exfiltrate data or push silent updates |
+| 1 | DevProof | Upgrade transparency, no exfiltration vectors, reproducible builds |
+| 2 | Decentralized | No single party controls upgrades |
+| 3 | Trustless | Cryptographic multi-vendor verification |
+
+**Most apps today are Stage 0.** Stage 1 is achievable with attention to detail.
+
+## Why this matters
+
+TEE protects your data from the cloud provider, but **not from the operator**. The operator controls `allowed_envs` -- environment variables injected at deploy time without changing the attested compose hash. If a URL handling your data is configurable via env, the operator can silently redirect your data to their own server:
+
+```yaml
+# DANGEROUS: operator sets LLM_BASE_URL to their proxy, captures all your prompts
+environment:
+  - LLM_BASE_URL=${LLM_BASE_URL}
+
+# SAFE: hardcoded in the attested compose, operator can't change it
+environment:
+  - LLM_BASE_URL=https://api.openai.com/v1
 ```
-/audit https://github.com/sangaline/tee-totalled https://4e0b5429671d8f90198c806f93e3c0a483f64cff-3000.dstack-pha-prod7.phala.network/
-```
 
-Claude clones the repo, reads the actual source code, fetches live attestation data, and produces a structured audit report covering:
+This tool traces every external URL in the codebase to determine if user data can be exfiltrated through operator-controlled configuration.
 
-- **Configuration Control** — traces every external URL to determine if user data can be exfiltrated by a malicious operator
-- **Attestation & TLS** — checks TDX quote presence, signing key binding, certificate fingerprint matching
-- **Build Reproducibility** — pinned images, SOURCE_DATE_EPOCH, lockfiles, CI pipeline
-- **Data Flow & Storage** — maps how user data moves through the system, what gets persisted, encryption at rest
-- **On-chain / KMS** — AppAuth contracts, upgrade timelocks, compose hash transparency
-- **Stage Assessment** — ERC-733 classification with full checklist
+## Case studies
 
-Each finding includes the actual vulnerable code with file:line references, a step-by-step attack vector, and specific fix recommendations.
+| App | Stage | Key Finding |
+|-----|-------|-------------|
+| tee-totalled | 0 | `LLM_BASE_URL` operator-configurable -- all user prompts exfiltrable. Signature verification is log-only. |
+| tokscope-xordi | 0 | RCE via `loadModuleFromUrl` (bare `require()` on fetched code). `allowed_envs` covers 2 of ~15 critical vars. |
+| xordi-toy-example | 0 | Hardcoded fallback encryption key in public source. Same RCE as tokscope. |
+| hermes | 0 | Zero attestation code despite dstack-sdk import. 7+ unauthenticated admin endpoints. All data to Firebase in plaintext. |
+| firecrawl | 0 | No TDX quote (--dev-os), massive configurable URL surface |
 
-### 2. `dstack_audit` — Python CLI (automated scanner)
+## For developers
+
+### Install the Claude Code skill
+
+Copy the audit skill into your project:
 
 ```bash
-python -m dstack_audit <repo_url> <website_url> -v
+mkdir -p .claude/commands
+curl -o .claude/commands/audit.md https://raw.githubusercontent.com/sxysun/is-this-real-tea/main/.claude/commands/audit.md
 ```
 
-Quick automated scan that greps 30+ patterns across 7 categories. Useful as a starting point, but the `/audit` skill produces much richer analysis by actually reading and understanding the code.
+Then use it:
 
-## Setup
+```
+/audit https://github.com/user/repo https://app-3000.dstack-pha-prod7.phala.network/
+```
 
-Copy this repo's `.claude/commands/audit.md` into your project's `.claude/commands/` to get the `/audit` command.
-
-Or clone this repo and run the Python tool directly:
+### Python CLI (quick scan)
 
 ```bash
 git clone https://github.com/sxysun/is-this-real-tea
@@ -41,49 +86,9 @@ cd is-this-real-tea
 python -m dstack_audit <repo_url> <website_url> -v
 ```
 
-## What the audit covers
+Automated grep of 30+ patterns across 7 categories. Useful as a starting point, but the agent-based audit produces much richer analysis.
 
-### Configuration Control (most critical)
-
-The core question: **can the operator exfiltrate user data?**
-
-TEE protects against cloud providers, but operators control `allowed_envs` — environment variables injected at runtime without changing the compose hash. If a URL handling user data is configurable via env, the operator can redirect it to their own server.
-
-```yaml
-# VULNERABLE: operator sets LLM_BASE_URL to capture all prompts
-environment:
-  - LLM_BASE_URL=${LLM_BASE_URL}
-
-# SAFE: hardcoded, operator can't change it
-environment:
-  - LLM_BASE_URL=https://api.redpill.ai/v1
-```
-
-### Attestation & TLS
-
-- Is there a TDX hardware quote? (empty = --dev-os, no TEE guarantees)
-- Is the signing key cryptographically bound to the quote's report_data?
-- Does the TLS certificate fingerprint match the attested fingerprint?
-- Gateway-terminated vs TLS passthrough (end-to-end)
-
-### ERC-733 Stage Assessment
-
-| Stage | Name | Meaning |
-|-------|------|---------|
-| 0 | Ruggable | Developer can push updates or exfiltrate data without notice |
-| 1 | DevProof | Upgrade transparency, no exfiltration vectors, reproducible builds |
-| 2 | Decentralized | No single party controls upgrades |
-| 3 | Trustless | Cryptographic multi-vendor verification |
-
-## Dependencies
-
-**Core:** Python 3.10+ stdlib only (no pip dependencies)
-
-**Optional:** `dcap-qvl-cli` for TDX quote hardware verification
-
-**Tests:** `pytest`
-
-## Tests
+### Tests
 
 ```bash
 pytest tests/ -v              # 52 cached tests, no network
@@ -92,19 +97,8 @@ pytest tests/ -v --run-live   # live tests against Phala Cloud
 
 ## References
 
-- `references/STAGE-1-CHECKLIST.md` — full ERC-733 Stage 1 requirements with verification commands
-- `references/checklist.md` — comprehensive audit checklist (7 sections, 50+ items)
-- `references/report-template.md` — structured report template
-- `references/erc733-summary.md` — ERC-733 overview
-
-## Case studies
-
-Tested against apps from [devproof-audits-guide](https://github.com/amiller/devproof-audits-guide):
-
-| App | Stage | Key Finding |
-|-----|-------|-------------|
-| hermes | 0 | Pha KMS, mutable image tags |
-| tee-totalled | 0 | `LLM_BASE_URL` configurable (exfiltration) |
-| tokscope-xordi | 0 | `${VAR}` image refs, configurable URLs, best repro builds |
-| xordi-toy-example | 1 | Reference implementation with Base KMS |
-| firecrawl | 0 | No TDX quote (--dev-os), massive URL surface |
+- [ERC-733 Draft v4](https://draftv4.erc733.org) -- the security stages framework
+- [dstack](https://github.com/Dstack-TEE/dstack) -- the TEE runtime
+- [devproof-audits-guide](https://github.com/amiller/devproof-audits-guide) -- case studies and methodology
+- `references/STAGE-1-CHECKLIST.md` -- full Stage 1 requirements with verification commands
+- `references/erc733-summary.md` -- ERC-733 overview
