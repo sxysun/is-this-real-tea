@@ -69,14 +69,52 @@ Show the vulnerable code with file:line references and explain the attack vector
 - Note which chain
 - Check for timelock on upgrades
 
-## Phase 3: Cross-Reference (if live deployment data available)
+## Phase 3: Build Reproducibility Verification
+
+If the repo has a Dockerfile, attempt to verify the build is reproducible:
+
+1. **Check if the repo has reproducibility infrastructure**:
+   - Look for `build-reproducible.sh`, `build-deterministic.sh`, or similar
+   - Check Dockerfiles for `SOURCE_DATE_EPOCH`, `--chmod=644`, `rewrite-timestamp`
+   - Check CI workflows for reproducible build steps
+
+2. **If reproducibility infra exists, try building**:
+   ```bash
+   # Build twice with --no-cache, compare hashes
+   docker buildx build \
+     --build-arg SOURCE_DATE_EPOCH=0 \
+     --no-cache \
+     --output type=oci,dest=build1.tar,rewrite-timestamp=true \
+     .
+   docker buildx build \
+     --build-arg SOURCE_DATE_EPOCH=0 \
+     --no-cache \
+     --output type=oci,dest=build2.tar,rewrite-timestamp=true \
+     .
+   # Compare: sha256sum build1.tar build2.tar
+   ```
+
+3. **If deployment data is available, compare against deployed digest**:
+   - Extract image references from the deployed `docker_compose_file`
+   - If images are pinned by `@sha256:`, pull them and compare layer hashes against your local build
+   - Use `skopeo inspect` to get the deployed image digest
+   - Compare: does your rebuild from source produce the same digest?
+
+4. **Report the result**:
+   - REPRODUCIBLE: local double-build matches, and (if applicable) matches deployed digest
+   - PARTIALLY REPRODUCIBLE: double-build matches but can't verify against deployment
+   - NOT REPRODUCIBLE: double-build produces different hashes (explain which layer differs)
+   - NOT ATTEMPTED: no Dockerfile or reproducibility infra found
+
+## Phase 4: Cross-Reference (if live deployment data available)
 
 - Compare the deployed `docker_compose_file` from app_compose against compose files in the repo
 - Check if deployed images match what the repo builds
 - Map `allowed_envs` against actual environment variable usage in code
 - Flag any `${VAR}` image references
+- If Phase 3 produced a local build, compare its digest against the deployed image digest
 
-## Phase 4: Generate Report
+## Phase 5: Generate Report
 
 Structure the report as follows:
 
@@ -117,6 +155,9 @@ For each critical finding:
 ## Build Reproducibility
 
 [What's pinned, what's not, can you reproduce the image?]
+[If you attempted a build in Phase 3, report: double-build result, deployed digest comparison]
+[If the image digest from your local build matches the deployed digest, state this explicitly — it's strong evidence]
+[If it doesn't match, investigate: which layer differs? Is it a timestamp issue or real divergence?]
 
 ## What's Done Well
 
@@ -129,6 +170,8 @@ For each critical finding:
 | Source code public | | |
 | Docker image public | | |
 | Build reproducible | | |
+| Build reproduced locally | | |
+| Deployed digest matches rebuild | | |
 | Critical URLs hardcoded | | |
 | TDX quote present | | |
 | Signing key bound to quote | | |
