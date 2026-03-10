@@ -1,6 +1,10 @@
 # is-this-real-tea
 
-Verify whether a [dstack](https://github.com/Dstack-TEE/dstack) TEE application is safe to interact with. Give it a GitHub repo (and optionally a deployment URL), get back a structured security audit.
+Check whether a TEE app is actually safe, or just security theater.
+
+A [TEE](https://github.com/Dstack-TEE/dstack) (Trusted Execution Environment) app runs inside tamper-proof hardware. The cloud provider can't read your data. But **the person who deployed the app still can** -- unless the code is set up to prevent it. Most apps haven't done this yet.
+
+This tool checks whether they have.
 
 ---
 
@@ -16,67 +20,81 @@ That's it. The agent will know what to do.
 
 ## What gets checked
 
-| Area | Core Question |
-|------|--------------|
-| **Configuration Control** | Can the operator redirect user data to their own server? |
-| **Attestation & TLS** | Is there a TDX hardware quote? Is the signing key bound to it? |
-| **Build Reproducibility** | Can you rebuild the exact same image from source? |
-| **Data Flow** | Where does user data go? What leaves the TEE boundary? |
-| **On-chain / KMS** | Are upgrades transparent? Is there a timelock? |
+| Question | Why it matters |
+|----------|---------------|
+| **Can the operator redirect your data?** | The #1 risk. If the app sends your data to a URL the operator can change at deploy time, they can silently reroute it to their own server. |
+| **Is the hardware actually attesting?** | TEE hardware can prove what code is running. If the app doesn't use this, or uses it wrong, the "secure hardware" claim means nothing. |
+| **Can you rebuild the code and get the same result?** | If you can't reproduce the exact same image from source code, you can't verify that what's running matches what's published. |
+| **Where does your data go?** | Data that leaves the TEE boundary (to an external database, API, etc.) is no longer protected by the hardware. |
+| **Can the operator push silent updates?** | If the operator can swap the code instantly with no public record, they can change behavior without anyone noticing. |
 
-The output is an [ERC-733](https://draftv4.erc733.org) stage assessment:
+## The trust spectrum
 
-| Stage | Name | What it means |
-|-------|------|---------------|
-| 0 | Ruggable | Operator can exfiltrate data or push silent updates |
-| 1 | DevProof | Upgrade transparency, no exfiltration vectors, reproducible builds |
-| 2 | Decentralized | No single party controls upgrades |
-| 3 | Trustless | Cryptographic multi-vendor verification |
+There's a huge gap between "runs in a TEE" and "actually safe." Here's how to think about it:
 
-**Most apps today are Stage 0.** Stage 1 is achievable with attention to detail.
+### The operator can still steal your data
+
+The app runs inside secure hardware, but the person who deployed it can still redirect your data, push silent updates, or swap out the code. **This is where most apps are today.** The TEE protects against the cloud provider, but if you're worried about the operator -- you have no guarantees.
+
+How to spot this:
+- URLs that handle your data are configurable (the operator can change where your data goes)
+- No public log of code changes
+- Docker images use tags instead of exact hashes (the operator can swap what's running)
+- The app has development backdoors or fallback modes
+
+### The operator's hands are tied
+
+The code is open source. Anyone can rebuild the exact same image and verify it matches what's deployed. Every code change is publicly logged with a waiting period before it takes effect. There are no configurable backdoors -- all URLs handling your data are baked into the attested code. The TLS certificate is cryptographically bound to the hardware attestation, so you can verify you're talking to the real TEE, not a proxy.
+
+How to verify:
+- All external URLs are hardcoded (not env-variable controlled)
+- Docker images are pinned by exact hash
+- Builds are reproducible (you can rebuild from source and get the same hash)
+- Code changes go through a public on-chain registry with a timelock
+- The TLS cert fingerprint matches what the TEE attests
+
+### No single person controls updates
+
+Multiple parties must agree before the code can change. No single developer, company, or operator can push an update alone. The app runs across multiple TEE providers so even if one hardware vendor is compromised, it keeps working.
+
+*This is aspirational -- very few apps have reached this level.*
 
 ## Why this matters
 
-TEE protects your data from the cloud provider, but **not from the operator**. The operator controls `allowed_envs` -- environment variables injected at deploy time without changing the attested compose hash. If a URL handling your data is configurable via env, the operator can silently redirect your data to their own server:
+TEE protects your data from the cloud provider, but **not from the operator**. The operator controls environment variables that get injected at deploy time without changing the attested code hash. If a URL handling your data is configurable via env, the operator can silently redirect your data:
 
 ```yaml
-# DANGEROUS: operator sets LLM_BASE_URL to their proxy, captures all your prompts
+# DANGEROUS: operator can change where your prompts go
 environment:
   - LLM_BASE_URL=${LLM_BASE_URL}
 
-# SAFE: hardcoded in the attested compose, operator can't change it
+# SAFE: baked into the attested code, operator can't change it
 environment:
   - LLM_BASE_URL=https://api.openai.com/v1
 ```
 
-This tool traces every external URL in the codebase to determine if user data can be exfiltrated through operator-controlled configuration.
+This tool traces every external URL in the codebase to determine if your data can be stolen through operator-controlled configuration.
 
 ## Case studies
 
-| App | Stage | Key Finding |
-|-----|-------|-------------|
-| tee-totalled | 0 | `LLM_BASE_URL` operator-configurable -- all user prompts exfiltrable. Signature verification is log-only. |
-| tokscope-xordi | 0 | RCE via `loadModuleFromUrl` (bare `require()` on fetched code). `allowed_envs` covers 2 of ~15 critical vars. |
-| xordi-toy-example | 0 | Hardcoded fallback encryption key in public source. Same RCE as tokscope. |
-| hermes | 0 | Zero attestation code despite dstack-sdk import. 7+ unauthenticated admin endpoints. All data to Firebase in plaintext. |
-| firecrawl | 0 | No TDX quote (--dev-os), massive configurable URL surface |
+| App | Can the operator steal data? | Key Finding |
+|-----|-----|-------------|
+| tee-totalled | **Yes** | The URL where your prompts are sent (`LLM_BASE_URL`) is configurable by the operator. They can redirect all your conversations to their own server. The code has signature verification but it only logs failures -- it doesn't actually block anything. |
+| tokscope-xordi | **Yes** | The operator can inject arbitrary code into the TEE via a module loader that downloads and executes JavaScript from a URL they control. Only 2 of ~15 security-critical settings are covered by attestation. |
+| xordi-toy-example | **Yes** | The fallback encryption key is hardcoded in the public source code (`tee-enclave-key-material-32chars`). Anyone who reads the repo can decrypt user cookies. |
+| hermes | **Yes** | The app imports the TEE SDK but never actually uses it -- zero attestation code. 7+ admin endpoints have no authentication at all. All user data is stored in Firebase in plaintext, outside the TEE. |
+| firecrawl | **Yes** | Not running on real TEE hardware (dev mode). The hardware attestation quote is empty. Massive number of configurable URLs that could redirect user data. |
 
 ## For developers
 
 ### Install the Claude Code skill
-
-Copy the audit skill into your project:
 
 ```bash
 mkdir -p .claude/commands
 curl -o .claude/commands/audit.md https://raw.githubusercontent.com/sxysun/is-this-real-tea/main/.claude/commands/audit.md
 ```
 
-Then use it:
-
-```
-/audit https://github.com/user/repo https://app-3000.dstack-pha-prod7.phala.network/
-```
+Then: `/audit https://github.com/user/repo https://deployed-app-url/`
 
 ### Python CLI (quick scan)
 
@@ -86,19 +104,15 @@ cd is-this-real-tea
 python -m dstack_audit <repo_url> <website_url> -v
 ```
 
-Automated grep of 30+ patterns across 7 categories. Useful as a starting point, but the agent-based audit produces much richer analysis.
-
 ### Tests
 
 ```bash
 pytest tests/ -v              # 52 cached tests, no network
-pytest tests/ -v --run-live   # live tests against Phala Cloud
+pytest tests/ -v --run-live   # live tests against real deployments
 ```
 
 ## References
 
-- [ERC-733 Draft v4](https://draftv4.erc733.org) -- the security stages framework
 - [dstack](https://github.com/Dstack-TEE/dstack) -- the TEE runtime
+- [ERC-733 Draft](https://draftv4.erc733.org) -- formal security stages framework (the academic version of the above)
 - [devproof-audits-guide](https://github.com/amiller/devproof-audits-guide) -- case studies and methodology
-- `references/STAGE-1-CHECKLIST.md` -- full Stage 1 requirements with verification commands
-- `references/erc733-summary.md` -- ERC-733 overview
