@@ -14,7 +14,7 @@ If you're short on time, check these four things:
 
 1. **Read `docker-compose.yml` and find every `${VAR}` pattern.** For each one, trace whether user data flows through that variable. If it does, the operator can redirect that data to their own server. **This is the #1 vulnerability in TEE apps.**
 
-2. **Search for attestation code** -- grep for `attestation`, `tdx`, `quote`, `dstack-sdk`, `getKey`. If there's nothing, the TEE is decoration. The hardware can prove what code is running, but if the app never asks it to, the proof doesn't exist. If there is code, check whether verification is actually enforced or just logged and ignored.
+2. **Search for attestation code** -- grep for `attestation`, `tdx`, `quote`, `dstack-sdk`, `getKey`, `rtmr`. If there's nothing, the TEE is decoration. The hardware can prove what code is running, but if the app never asks it to, the proof doesn't exist. If there is code, check whether verification is actually enforced or just logged and ignored. Also check if attestation data is available from ANY source (the app, 8090, Trust Center) -- the cryptographic proof is self-verifying regardless of where it comes from.
 
 3. **Check Dockerfiles for `FROM image@sha256:`** -- if base images aren't pinned by exact hash, anyone could swap in different code and the builds can't be verified.
 
@@ -26,32 +26,45 @@ If any of these fail, **the operator can still steal user data**. Report what yo
 
 ## Full audit methodology
 
-### Phase 1: Gather deployment data
+### Phase 1: Gather attestation data
 
-If the user provided a deployment URL, try to fetch attestation data. Adapt to what's available:
+Attestation is a cryptographic proof -- it doesn't matter where you get it from. You verify the proof itself, not the transport. Try any of these sources:
 
-**Phala Cloud gateway URL** (format: `https://{app_id}-{port}[s].{cluster}.phala.network/`):
+**From the user**: If they provide attestation data (JSON, a URL, a Trust Center link), use it directly. The data is self-verifying.
+
+**From the app**: Many apps expose their own attestation endpoint:
 ```bash
-# Extract app_id from the URL, try the 8090 metadata endpoint
-curl -s "https://{app_id}-8090.{cluster}.phala.network/"
-
-# If 8090 fails, try the Cloud API
-curl -s "https://cloud-api.phala.network/api/v1/apps/{app_id}/attestations"
-
-# Try the app's own attestation endpoint
 curl -s "https://{deployment_url}/attestation"
+curl -s "https://{deployment_url}/v1/attestation/report"
+curl -s "https://{deployment_url}/.well-known/attestation"
 ```
 
-**Custom domain**: look up `_dstack-app-address` DNS TXT record to find the gateway URL, then follow above.
+**From Phala Cloud infrastructure**: If the app runs on Phala, you can also try:
+```bash
+# The 8090 metadata endpoint (if available)
+curl -s "https://{app_id}-8090.{cluster}.phala.network/"
 
-**No deployment URL**: do code-only analysis. Note which checks couldn't be performed without a live deployment.
+# The Cloud API
+curl -s "https://cloud-api.phala.network/api/v1/apps/{app_id}/attestations"
 
-From whatever source, try to extract:
-- `app_compose` JSON (contains `docker_compose_file`, `allowed_envs`, `kms_enabled`, `pre_launch_script`)
-- Compose hash (a fingerprint of the deployed configuration)
-- TDX quote (hardware proof of what's running -- if empty, the app is running in dev mode with no real TEE protection)
-- TLS certificate fingerprint
-- Docker image references from the deployed compose
+# The Trust Center (shows verified attestation status)
+# https://trust.phala.com/app/{app_id}
+```
+
+**From a custom domain**: look up `_dstack-app-address` DNS TXT record to find the app_id and cluster, then use the above.
+
+**No attestation data at all**: do code-only analysis. Note which checks couldn't be performed.
+
+**What to look for in the attestation data** (regardless of source):
+
+The attestation contains cryptographic measurements that prove what code is running inside the TEE. Key fields:
+- **RTMRs** (Runtime Measurement Registers: `mrtd`, `rtmr0`, `rtmr1`, `rtmr2`, `rtmr3`) -- hardware-generated hashes of the firmware, OS, and application layers. These are the core proof.
+- **compose_hash** -- SHA-256 of the app's configuration. If the config changes, this changes.
+- **TDX quote** -- a signed blob from Intel TDX hardware containing the RTMRs. If this is empty AND there are no RTMRs, the app may be running in dev mode with no real TEE protection.
+- **event_log** -- a log of boot-time measurements that can be replayed to derive the RTMRs.
+- **app_compose** -- the actual deployed configuration (contains `docker_compose_file`, `allowed_envs`, `kms_enabled`, `pre_launch_script`).
+
+**Important**: RTMRs and event_log entries ARE attestation measurements even if the raw TDX quote blob isn't served at the endpoint you're looking at. The quote might be stored elsewhere (e.g., Trust Center) while the measurements derived from it are served at 8090 or the app's own endpoint. Don't conclude "no attestation" just because one field is empty -- check whether the measurements themselves are present.
 
 ### Phase 1b: Verify TLS binding (if deployment URL provided)
 
@@ -234,7 +247,7 @@ For each critical finding:
 | Docker images pinned by exact hash | | |
 | Builds are reproducible | | |
 | All data-handling URLs are hardcoded (not configurable) | | |
-| Hardware attestation quote is present | | |
+| Hardware attestation is present (quote, RTMRs, or verified measurements) | | |
 | TLS certificate is bound to attestation | | |
 | TLS terminates in the TEE (not a gateway) | | |
 | No dev mode fallbacks in production | | |
@@ -299,6 +312,6 @@ Spell out exactly what this app protects against and what it doesn't. Be specifi
 Key concepts:
 - **compose hash**: a fingerprint of the app's configuration (docker-compose + settings). The hardware attests this hash. If the compose changes, the hash changes.
 - **allowed_envs**: environment variables the operator can change WITHOUT changing the compose hash. **This is the primary attack surface.** If a URL handling user data is in `allowed_envs`, the operator can redirect your data without invalidating the attestation.
-- **8090 endpoint**: metadata page at `{app_id}-8090.{cluster}.phala.network/` showing the full configuration, including what env vars the operator can control.
+- **attestation sources**: attestation data is cryptographically self-verifying, so it doesn't matter where you get it. Common sources: the app's own `/attestation` endpoint, the Phala 8090 metadata page (`{app_id}-8090.{cluster}.phala.network/`), the Trust Center (`trust.phala.com/app/{app_id}`), or a JSON file the user provides. All are equally valid -- you verify the proof, not the messenger.
 - **KMS** (Key Management Service): where encryption keys come from. If the operator manages keys, they can decrypt your data. If the TEE derives keys internally (via hardware), the operator can't.
 - **AppAuth**: an on-chain smart contract that records which code versions are allowed to run. If changes require a timelock (waiting period), users can see updates coming and react before they take effect.

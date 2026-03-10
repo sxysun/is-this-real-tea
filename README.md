@@ -82,7 +82,7 @@ This tool traces every external URL in the codebase to determine if your data ca
 | tee-totalled | **Yes** | The URL where your prompts are sent (`LLM_BASE_URL`) is configurable by the operator. They can redirect all your conversations to their own server. The code has signature verification but it only logs failures -- it doesn't actually block anything. |
 | tokscope-xordi | **Yes** | The operator can inject arbitrary code into the TEE via a module loader that downloads and executes JavaScript from a URL they control. Only 2 of ~15 security-critical settings are covered by attestation. |
 | xordi-toy-example | **Yes** | The fallback encryption key is hardcoded in the public source code (`tee-enclave-key-material-32chars`). Anyone who reads the repo can decrypt user cookies. |
-| hermes | **Yes** | The app imports the TEE SDK but never actually uses it -- zero attestation code. 7+ admin endpoints have no authentication at all. All user data is stored in Firebase in plaintext, outside the TEE. |
+| hermes | **Yes** | Hardware attestation exists (RTMRs present, Trust Center verified), but the app code never uses the TEE SDK for key derivation. Firebase credentials are in `allowed_envs` -- the operator can point the app at a different database. 7+ admin endpoints have no authentication. All user data is stored in Firebase outside the TEE. |
 | firecrawl | **Yes** | Not running on real TEE hardware (dev mode). The hardware attestation quote is empty. Massive number of configurable URLs that could redirect user data. |
 
 ## For developers
