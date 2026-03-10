@@ -8,13 +8,15 @@ You are about to audit a dstack/Phala TEE application for production safety. Fol
 
 ## Quick version
 
-If you're short on time, focus on these three things:
+If you're short on time, focus on these four things:
 
 1. **Clone the repo and read `docker-compose.yml`** -- find every `${VAR}` pattern. For each one, check if user data flows through that variable. If yes, the operator can exfiltrate that data. **This is the most common critical vulnerability.**
 
 2. **Search for attestation code** -- grep for `attestation`, `tdx`, `quote`, `dstack-sdk`, `getKey`. If there's nothing, the TEE is decorative. If there's code, check if verification is enforced or just logged.
 
 3. **Check Dockerfiles for `FROM image@sha256:`** -- if base images aren't pinned by digest, builds aren't reproducible and the deployed code can't be verified.
+
+4. **If you have a deployment URL, verify TLS binding** -- connect via TLS, get the cert fingerprint, compare it against the app's `/attestation` endpoint. If they don't match (or there's no attestation endpoint), the connection isn't proven to terminate inside the TEE.
 
 Any of these failing = **Stage 0 (Ruggable)**. Report what you find.
 
@@ -48,6 +50,44 @@ From whatever source, try to extract:
 - TDX quote (empty = `--dev-os`, no TEE guarantees)
 - TLS certificate fingerprint
 - Docker image references from the deployed compose
+
+### Phase 1b: Verify TLS binding (if deployment URL provided)
+
+This is the cryptographic proof that you're talking to code inside a TEE, not a proxy.
+
+**How it works**: The app generates a TLS certificate inside the TEE, computes `SHA256(cert_DER)`, and passes that fingerprint as `reportData` to the TDX `getQuote()` call. This binds the certificate to the attestation quote. To verify, you compare the fingerprint from the live TLS handshake against the fingerprint in the attestation response.
+
+**Step 1: Get the certificate fingerprint from the live TLS connection**
+```bash
+# Connect to the site and extract the cert fingerprint
+echo | openssl s_client -connect HOST:PORT 2>/dev/null | \
+  openssl x509 -outform DER 2>/dev/null | shasum -a 256
+```
+
+**Step 2: Get the attested fingerprint from the app**
+```bash
+# Try common attestation endpoint paths
+curl -sk https://HOST:PORT/attestation | python3 -c "import sys,json; print(json.load(sys.stdin).get('certFingerprint','NOT FOUND'))"
+
+# If that fails, try these alternatives:
+# curl -sk https://HOST:PORT/v1/attestation/report
+# curl -sk https://HOST:PORT/.well-known/attestation
+# curl -sk https://HOST:PORT/quote
+```
+
+**Step 3: Compare**
+- **Match** → the certificate private key is proven to be inside the attested TEE. Connection is end-to-end secure regardless of any relay/proxy/gateway in between.
+- **Mismatch** → possible MITM, or the gateway is terminating TLS (not the TEE). Report this.
+- **No attestation endpoint** → TLS binding cannot be verified. Note this as a gap.
+
+**Important: gateway-terminated vs TLS passthrough**
+
+Look at the URL format:
+- `{app_id}-443.cluster.phala.network` → **gateway-terminated TLS**. The Phala gateway terminates TLS, so the cert is from the gateway, not the TEE. The connection is encrypted to the gateway, then re-encrypted to the TEE. You trust the gateway.
+- `{app_id}-443s.cluster.phala.network` (note the **`s`** suffix) → **TLS passthrough**. The TEE terminates TLS directly. The cert should be from the TEE, and binding verification should work.
+- If the app uses a custom domain, check if it points to a gateway or directly to the TEE's port.
+
+For gateway-terminated TLS, note in the report: "TLS is gateway-terminated. Users trust the Phala gateway infrastructure, not just the TEE. For end-to-end verification, the app would need TLS passthrough."
 
 ### Phase 2: Analyze the source code
 
@@ -192,6 +232,8 @@ For each critical finding:
 | Critical URLs hardcoded | | |
 | TDX quote present | | |
 | Signing key bound to quote | | |
+| TLS cert bound to attestation | | |
+| TLS terminates in TEE (not gateway) | | |
 | No dev fallbacks in prod | | |
 | KMS keys (not operator-injected) | | |
 | AppAuth contract | | |
