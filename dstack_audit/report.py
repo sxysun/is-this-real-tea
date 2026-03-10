@@ -72,6 +72,70 @@ def generate_report(report: AuditReport) -> str:
                         lines.append(f"  - `{img}`")
         lines.append("")
 
+    # Phase 2b: Attestation Verification
+    if report.attestation:
+        a = report.attestation
+        qv = a.quote_verification
+        dv = a.dstack_verification
+        if qv or dv:
+            lines.append("## Phase 2b: Attestation Verification")
+            lines.append("")
+            lines.append("| Check | Status |")
+            lines.append("|-------|--------|")
+
+            if qv:
+                if qv.verified:
+                    lines.append("| TDX quote signature valid | PASS |")
+                elif qv.error:
+                    lines.append(f"| TDX quote signature valid | FAIL ({qv.error}) |")
+                else:
+                    lines.append("| TDX quote signature valid | SKIPPED (parsed only) |")
+
+                if qv.tcb_status:
+                    lines.append(f"| TCB status | {qv.tcb_status} |")
+
+                if qv.compose_hash_matches is True:
+                    lines.append("| Compose hash matches quote | PASS |")
+                elif qv.compose_hash_matches is False:
+                    lines.append("| Compose hash matches quote | FAIL |")
+                else:
+                    lines.append("| Compose hash matches quote | N/A |")
+
+                if qv.report_data_valid is True:
+                    lines.append("| Report data binding | PASS |")
+                elif qv.report_data_valid is False:
+                    lines.append("| Report data binding | FAIL |")
+
+            if dv:
+                if dv.verified:
+                    lines.append("| Event log replay | PASS |")
+                    lines.append(f"| App component valid | {'PASS' if dv.app_valid else 'FAIL'} |")
+                    lines.append(f"| KMS component valid | {'PASS' if dv.kms_valid else 'FAIL'} |")
+                    lines.append(f"| Gateway component valid | {'PASS' if dv.gateway_valid else 'FAIL'} |")
+                    lines.append(f"| Compose verified by service | {'PASS' if dv.compose_verified else 'FAIL'} |")
+                elif dv.error:
+                    lines.append(f"| Event log replay | SKIPPED ({dv.error}) |")
+
+            # Show extracted measurements if available
+            if qv and (qv.mr_config_id or qv.rtmr0):
+                lines.append("")
+                lines.append("**Extracted Measurements:**")
+                lines.append("")
+                if qv.mr_config_id:
+                    lines.append(f"- mr_config_id: `{qv.mr_config_id[:32]}...`")
+                if qv.mr_td:
+                    lines.append(f"- mr_td: `{qv.mr_td[:32]}...`")
+                if qv.rtmr0:
+                    lines.append(f"- rtmr0: `{qv.rtmr0[:32]}...`")
+                if qv.rtmr1:
+                    lines.append(f"- rtmr1: `{qv.rtmr1[:32]}...`")
+                if qv.rtmr2:
+                    lines.append(f"- rtmr2: `{qv.rtmr2[:32]}...`")
+                if qv.rtmr3:
+                    lines.append(f"- rtmr3: `{qv.rtmr3[:32]}...`")
+
+            lines.append("")
+
     # Phase 3: TLS Binding
     if report.tls:
         t = report.tls
@@ -159,6 +223,8 @@ def generate_report(report: AuditReport) -> str:
         lines.append("|---|---|")
         labels = {
             'tdx_quote': 'TDX Hardware Quote',
+            'quote_verified': 'Quote Cryptographically Verified',
+            'compose_hash_verified': 'Compose Hash Matches Quote',
             'onchain_kms': 'On-chain KMS (AppAuth)',
             'pinned_images': 'Pinned Image Digests',
             'no_exfiltration_vectors': 'No Exfiltration Vectors',

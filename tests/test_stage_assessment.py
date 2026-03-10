@@ -120,7 +120,8 @@ class TestStageAssessment:
             findings=[],
         )
         expected_keys = {
-            'tdx_quote', 'onchain_kms', 'pinned_images',
+            'tdx_quote', 'quote_verified', 'compose_hash_verified',
+            'onchain_kms', 'pinned_images',
             'no_exfiltration_vectors', 'tls_binding',
             'reproducible_builds', 'timelock', 'appauth_contract',
         }

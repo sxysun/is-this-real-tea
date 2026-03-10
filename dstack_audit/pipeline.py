@@ -5,7 +5,15 @@ import tempfile
 
 from .models import AuditReport, Finding, Severity, Stage
 from .phases.url_parser import parse_phala_url, get_info_url
-from .phases.attestation import fetch_attestation
+from .phases.attestation import (
+    fetch_attestation,
+    fetch_cloud_api_full,
+    parse_tdx_quote_manual,
+    verify_compose_hash_against_quote,
+    verify_quote_dcap,
+    verify_report_data_binding,
+    verify_with_dstack_service,
+)
 from .phases.tls_binding import verify_tls_binding
 from .phases.code_analysis import analyze_code, clone_repo
 from .phases.cross_reference import cross_reference
@@ -63,6 +71,68 @@ def run_audit(repo_url: str, website_url: str, verbose: bool = False) -> AuditRe
     else:
         log(f"  App: {attestation.app_name}")
         log(f"  TDX quote: {attestation.has_tdx_quote}")
+
+    # Fetch full attestation data from Cloud API if we have an app_id
+    if parsed:
+        log("  Fetching Cloud API attestation data...")
+        cloud_data = fetch_cloud_api_full(parsed.app_id)
+        if cloud_data:
+            attestation.cloud_api_data = cloud_data
+            # Use Cloud API quote if we don't have one from 8090
+            if not attestation.quote_hex and cloud_data.get('app_quote'):
+                attestation.quote_hex = cloud_data['app_quote']
+                attestation.has_tdx_quote = bool(attestation.quote_hex)
+                log("  Got TDX quote from Cloud API")
+
+    # Phase 2b: Verify attestation cryptographically
+    if attestation.quote_hex:
+        log("Phase 2b: Verifying attestation cryptographically...")
+
+        # Try dcap-qvl first (full cryptographic verification)
+        qv = verify_quote_dcap(attestation.quote_hex)
+        if qv.error and 'not installed' in qv.error:
+            # Fall back to manual parsing (extracts fields but no signature check)
+            log(f"  dcap-qvl not available, falling back to manual parsing")
+            qv = parse_tdx_quote_manual(attestation.quote_hex)
+
+        attestation.quote_verification = qv
+
+        if qv.error:
+            log(f"  Quote verification: {qv.error}")
+        else:
+            log(f"  Quote verified: {qv.verified}")
+            log(f"  TCB status: {qv.tcb_status}")
+
+            # Compare compose hash against mr_config_id
+            if attestation.compose_hash:
+                qv.compose_hash_matches = verify_compose_hash_against_quote(
+                    attestation.compose_hash, qv
+                )
+                log(f"  Compose hash matches quote: {qv.compose_hash_matches}")
+
+            # Verify report_data binding if we have the data
+            if qv.report_data:
+                rd_result = verify_report_data_binding(qv.report_data)
+                qv.report_data_valid = rd_result.get('valid', False)
+                qv.report_data_details = rd_result
+                log(f"  Report data first 32 bytes: {rd_result.get('report_data_first_32', 'N/A')[:16]}...")
+
+        # Try dstack-verifier service for event log replay
+        cloud = attestation.cloud_api_data or {}
+        event_log = cloud.get('app_event_log', '')
+        vm_config = cloud.get('app_vm_config', '')
+        if event_log or vm_config:
+            log("  Trying dstack-verifier service for event log replay...")
+            dv = verify_with_dstack_service(
+                attestation.quote_hex, event_log, vm_config, attestation.app_compose
+            )
+            attestation.dstack_verification = dv
+            if dv.error:
+                log(f"  dstack-verifier: {dv.error}")
+            else:
+                log(f"  dstack-verifier: verified={dv.verified}")
+    else:
+        log("  No TDX quote available, skipping cryptographic verification")
 
     # Phase 3: TLS Binding
     log("Phase 3: Verifying TLS binding...")

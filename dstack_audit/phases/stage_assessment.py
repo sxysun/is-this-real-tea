@@ -45,9 +45,65 @@ def assess_stage(
         'appauth_contract': False,
     }
 
-    # Check TDX quote
+    # Check TDX quote (and cryptographic verification)
     if attestation and attestation.has_tdx_quote:
         checklist['tdx_quote'] = True
+
+        # Factor in cryptographic verification results
+        qv = attestation.quote_verification
+        if qv:
+            if qv.verified:
+                checklist['quote_verified'] = True
+            elif qv.error:
+                checklist['quote_verified'] = False
+                assessment.reasons.append(f"Quote verification: {qv.error}")
+            else:
+                # Parsed but not cryptographically verified
+                checklist['quote_verified'] = False
+                assessment.reasons.append(
+                    "TDX quote parsed but not cryptographically verified "
+                    "(dcap-qvl not available)"
+                )
+
+            if qv.compose_hash_matches is True:
+                checklist['compose_hash_verified'] = True
+            elif qv.compose_hash_matches is False:
+                checklist['compose_hash_verified'] = False
+                assessment.reasons.append(
+                    "Compose hash MISMATCH: computed hash does not match "
+                    "mr_config_id in TDX quote"
+                )
+                new_findings.append(Finding(
+                    phase="stage_assessment",
+                    severity=Severity.CRITICAL,
+                    title="Compose hash mismatch with TDX quote",
+                    detail=(
+                        "The locally computed compose hash does not match the "
+                        "mr_config_id embedded in the TDX quote. The deployed "
+                        "configuration may differ from what was attested."
+                    ),
+                    category="compose_hash_mismatch",
+                ))
+
+            # TCB status check
+            if qv.tcb_status and qv.tcb_status not in (
+                'UpToDate', 'SWHardeningNeeded',
+                'unverified (parsed manually, dcap-qvl not available)',
+            ):
+                new_findings.append(Finding(
+                    phase="stage_assessment",
+                    severity=Severity.WARNING,
+                    title=f"TCB status: {qv.tcb_status}",
+                    detail=(
+                        f"The TCB (Trusted Computing Base) status is "
+                        f"'{qv.tcb_status}'. This may indicate outdated "
+                        f"firmware or known vulnerabilities in the TEE platform."
+                    ),
+                    category="tcb_status",
+                ))
+        else:
+            checklist['quote_verified'] = False
+            checklist['compose_hash_verified'] = False
     else:
         assessment.reasons.append("No TDX quote (likely --dev-os mode)")
         new_findings.append(Finding(
@@ -60,6 +116,8 @@ def assess_stage(
             ),
             category="no_tdx",
         ))
+        checklist['quote_verified'] = False
+        checklist['compose_hash_verified'] = False
 
     # Check KMS type (Pha KMS vs on-chain)
     if attestation and attestation.kms_enabled:

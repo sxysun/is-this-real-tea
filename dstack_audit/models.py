@@ -34,6 +34,33 @@ class ParsedURL:
 
 
 @dataclass
+class QuoteVerification:
+    verified: bool = False
+    tcb_status: Optional[str] = None
+    mr_config_id: Optional[str] = None
+    mr_td: Optional[str] = None
+    rtmr0: Optional[str] = None
+    rtmr1: Optional[str] = None
+    rtmr2: Optional[str] = None
+    rtmr3: Optional[str] = None
+    report_data: Optional[str] = None
+    compose_hash_matches: Optional[bool] = None
+    report_data_valid: Optional[bool] = None
+    report_data_details: Optional[dict] = None
+    error: Optional[str] = None
+
+
+@dataclass
+class DstackVerification:
+    verified: bool = False
+    app_valid: bool = False
+    kms_valid: bool = False
+    gateway_valid: bool = False
+    compose_verified: bool = False
+    error: Optional[str] = None
+
+
+@dataclass
 class AttestationResult:
     app_compose: Optional[dict] = None
     compose_hash: Optional[str] = None
@@ -46,6 +73,9 @@ class AttestationResult:
     app_name: str = ""
     raw_html: str = ""
     error: Optional[str] = None
+    quote_verification: Optional[QuoteVerification] = None
+    dstack_verification: Optional[DstackVerification] = None
+    cloud_api_data: Optional[dict] = None
 
 
 @dataclass
