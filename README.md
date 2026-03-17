@@ -87,20 +87,51 @@ This tool traces every external URL in the codebase to determine if your data ca
 
 ## For developers
 
-### Install the Claude Code skill
+### Install as a Claude Code skill (plug and play)
 
-```bash
-mkdir -p .claude/commands
-curl -o .claude/commands/audit.md https://raw.githubusercontent.com/sxysun/is-this-real-tea/main/.claude/commands/audit.md
-```
-
-Then: `/audit https://github.com/user/repo https://deployed-app-url/`
-
-### Python CLI (quick scan)
+Clone the repo and point your agent at it:
 
 ```bash
 git clone https://github.com/sxysun/is-this-real-tea
 cd is-this-real-tea
+```
+
+Then use the slash commands:
+
+```
+/audit https://github.com/user/repo https://deployed-app-url/
+/check-tee --repo https://github.com/user/repo --url https://app.example.com
+```
+
+Or install just the commands into any project:
+
+```bash
+mkdir -p .claude/commands
+curl -o .claude/commands/audit.md https://raw.githubusercontent.com/sxysun/is-this-real-tea/main/.claude/commands/audit.md
+curl -o .claude/commands/check-tee.md https://raw.githubusercontent.com/sxysun/is-this-real-tea/main/.claude/commands/check-tee.md
+```
+
+### Agent-guided audit (any AI agent)
+
+Point any AI agent at `AGENT.md`:
+
+> Read https://raw.githubusercontent.com/sxysun/is-this-real-tea/main/AGENT.md and then audit this TEE app: `<github_repo_url>` deployed at `<website_url>`
+
+The agent follows a 5-phase methodology with decision gates, produces a one-glance card verdict, and consults reference files for context.
+
+### Quick automated scan
+
+```bash
+# Automated vulnerability scan (no AI needed)
+./tools/audit-checks.sh /path/to/repo
+
+# Verify compose hash from live deployment
+python3 tools/verify-compose-hash.py <app-id> [cluster]
+```
+
+### Python CLI
+
+```bash
 python -m dstack_audit <repo_url> <website_url> -v
 ```
 
@@ -109,6 +140,30 @@ python -m dstack_audit <repo_url> <website_url> -v
 ```bash
 pytest tests/ -v              # 52 cached tests, no network
 pytest tests/ -v --run-live   # live tests against real deployments
+```
+
+## Repo structure
+
+```
+is-this-real-tea/
+├── AGENT.md                          # Main audit methodology (the skill)
+├── .claude/commands/
+│   ├── audit.md                      # /audit slash command
+│   └── check-tee.md                  # /check-tee slash command
+├── references/
+│   ├── devproof-stages.md            # Stage criteria (Unproven/Stage 0/Stage 1)
+│   ├── live-checks.md                # Endpoint heuristics, TLS binding
+│   ├── case-studies.md               # Patterns from real audits
+│   ├── search-patterns.md            # Grep patterns for vulnerabilities
+│   ├── checklist.md                  # Comprehensive audit checklist
+│   ├── report-template.md            # One-glance card + report structure
+│   ├── STAGE-1-CHECKLIST.md          # ERC-733 Stage 1 requirements
+│   └── erc733-summary.md             # ERC-733 security stages framework
+├── tools/
+│   ├── verify-compose-hash.py        # Fetch 8090 metadata, verify compose hash
+│   └── audit-checks.sh               # Automated vulnerability scan
+├── dstack_audit/                     # Python CLI tool
+└── tests/                            # Test suite
 ```
 
 ## References

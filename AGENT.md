@@ -6,6 +6,19 @@ The app runs inside tamper-proof hardware that the cloud provider can't read. Bu
 
 **You need**: a GitHub repo URL (required), and optionally a deployment URL or attestation data.
 
+**Reference files** (consult during audit):
+- `references/devproof-stages.md` — stage criteria (Unproven / Stage 0 / Stage 1)
+- `references/live-checks.md` — endpoint heuristics, TLS binding classification
+- `references/case-studies.md` — patterns from real audits
+- `references/search-patterns.md` — grep patterns for common vulnerabilities
+- `references/STAGE-1-CHECKLIST.md` — ERC-733 Stage 1 requirements
+- `references/report-template.md` — report structure
+- `references/checklist.md` — comprehensive audit checklist
+
+**Tools** (use during audit):
+- `tools/verify-compose-hash.py` — fetches 8090 metadata and verifies compose hash
+- `tools/audit-checks.sh` — quick automated vulnerability scan
+
 ---
 
 ## Quick version
@@ -102,6 +115,81 @@ Look at the URL:
 
 If gateway-terminated, note: "TLS terminates at the gateway, not the TEE. Users trust Phala's gateway infrastructure in addition to the TEE."
 
+### Phase 1c: Verify attestation cryptographically
+
+**Compose hash mismatch = stop and report.** If `verify-compose-hash.py` shows the computed hash doesn't match the expected hash, the metadata page is lying or corrupted. Nothing else can be trusted. Report this immediately.
+
+If attestation data is available, verify it cryptographically rather than just checking it exists.
+
+**Step 1: Verify the TDX quote (requires dcap-qvl)**
+```bash
+# Install dcap-qvl if not present
+CFLAGS="-g0" cargo install dcap-qvl-cli
+
+# Write quote hex to file and verify
+echo "<quote_hex>" > /tmp/quote.hex
+dcap-qvl verify --hex /tmp/quote.hex
+```
+This verifies the Intel TDX quote signature against DCAP collateral and extracts RTMRs, mr_config_id, and report_data. Check:
+- **TCB status**: "UpToDate" is ideal, "SWHardeningNeeded" is acceptable, anything else is a concern
+- **mr_config_id**: contains the compose hash (format: `01` + 32-byte SHA-256 hash + zero padding)
+
+**Step 2: Compare compose hash**
+Compute `SHA-256(canonical_json(app_compose))` where canonical JSON uses `separators=(',', ':')` and `sort_keys=True`. Compare this against the hash extracted from `mr_config_id[2:66]`. If they match, the deployed configuration is what the hardware attested.
+
+**Step 3: Verify report_data binding**
+The report_data field (64 bytes) typically contains:
+- Bytes 0-31: signing address (or app-specific binding)
+- Bytes 32-63: nonce
+
+**Step 4: Event log replay (optional, requires dstack-verifier)**
+```bash
+# Run the verifier service
+docker run -d -p 8080:8080 dstacktee/dstack-verifier
+
+# POST quote + event_log + vm_config for full verification
+curl -X POST http://localhost:8080/verify \
+  -H "Content-Type: application/json" \
+  -d '{"quote": "<hex>", "event_log": "<base64>", "vm_config": "<json>"}'
+```
+This replays the TCG event log against RTMRs using QEMU, verifying boot integrity.
+
+**If dcap-qvl is NOT installed**: Parse the quote manually to extract measurements (fields are at fixed offsets in the TDX Quote v4 structure), but note that the quote signature has NOT been verified.
+
+**If you cannot verify the TDX quote, EXPLICITLY STATE THIS.** Write:
+> TDX quote verification: NOT PERFORMED — [reason]. The compose hash matches but the attestation chain is unverified.
+
+Do not silently pass this check. "NOT VERIFIED" is an honest finding.
+
+### Phase 1 output
+
+Record these facts before proceeding:
+
+```
+REPO: <path or url>
+COMPOSE_FILES: <list>
+DOCKERFILES: <list>
+APP_ID: <if known>
+COMPOSE_HASH: <from verify-compose-hash.py or 8090>
+COMPOSE_HASH_MATCH: <yes/no/not checked>
+ALLOWED_ENVS: <list from app_compose>
+TLS_SUBJECT: <CN>
+TLS_FINGERPRINT: <sha256>
+ATTESTATION_ENDPOINTS: <list of working endpoints>
+```
+
+### Quick automated scan
+
+Before deep analysis, run the automated checker to identify areas of concern:
+```bash
+./tools/audit-checks.sh /path/to/repo
+```
+
+If you have an app_id, verify the compose hash:
+```bash
+python3 tools/verify-compose-hash.py <app-id> [cluster]
+```
+
 ### Phase 2: Analyze the source code
 
 Clone the repo and perform deep analysis. **Read the actual code -- don't just grep.**
@@ -119,6 +207,22 @@ Do this:
 3. A URL is only dangerous if user data flows through it. Config URLs for non-sensitive data are fine.
 4. Show the vulnerable code with file:line references and explain the attack.
 
+**Environment variable risk taxonomy** — classify each variable in `allowed_envs`:
+
+| Category | Risk | Example |
+|----------|------|---------|
+| **Data destination** | CRITICAL | URL that receives user content (API_URL, LLM_BASE_URL, POSTHOG_HOST) |
+| **Code/image selector** | CRITICAL | Chooses what code runs (IMAGE_TAG, MODULE_URL) |
+| **API key / credential** | HIGH | Authentication token (API_KEY, BOT_TOKEN) — operator holds the key |
+| **Feature flag** | MEDIUM | Toggles behavior (ENABLE_LOGGING, DEBUG) |
+| **Cosmetic** | LOW | Display name, theme (APP_NAME, BRAND_COLOR) |
+
+For CRITICAL variables, read the code that uses them and trace the full data flow:
+1. Where does user data enter? (HTTP handler, WebSocket, etc.)
+2. Where does it go? (Follow the variable through the code)
+3. Does it reach a URL controlled by this env var?
+4. Provide exact file:line evidence.
+
 **Example finding:**
 ```
 CRITICAL: Operator can steal all user prompts
@@ -135,6 +239,28 @@ Attack:
 3. The attested code hash doesn't change (env vars are outside it)
 4. Users see valid attestation but their data is being stolen
 ```
+
+#### 2a-ii. Check docker_compose_file for ${VAR} patterns
+
+If you have the deployed `docker_compose_file` (from app_compose via 8090 metadata), search it:
+
+For each `${VAR}`:
+- Is this variable in `allowed_envs`? If yes, the operator controls it.
+- Does it point to an image? → operator controls what code runs
+- Does it point to a URL? → operator can redirect traffic
+- Is it a hardcoded value like `API_URL=https://...`? → good, baked into compose hash
+
+#### 2a-iii. Check for pre_launch_script
+
+If `pre_launch_script` exists in app_compose, read it carefully. This runs before docker-compose up and can do anything: download binaries, modify config files, set additional environment variables.
+
+#### 2a-iv. Look for outbound data paths
+
+Use patterns from `references/search-patterns.md`:
+
+- Find all HTTP clients in the code (httpx, requests, aiohttp, fetch, axios)
+- Find where user content is sent (user_prompt, message, content, payload, body)
+- For each outbound call: is the destination hardcoded or configurable?
 
 #### 2b. Does the app actually use the TEE hardware?
 
@@ -174,6 +300,20 @@ Check:
 - Note which blockchain (Base, Ethereum, etc.)
 - If there's no public upgrade log, the operator can swap the code at any time without anyone knowing
 
+### Phase 2 decision gate
+
+Before proceeding, produce a clear statement:
+
+> **Can the operator redirect user data?** YES / NO / PARTIALLY
+>
+> Evidence: [list the exact env vars and code paths]
+>
+> Example: The operator controls `LLM_BASE_URL` (in allowed_envs) which is loaded at
+> `src/config.py:28` and receives all user prompts via the chat endpoint at `src/api.py:45`.
+> This means the operator can point it to their own server and capture all conversations.
+
+This verdict is more useful than any numerical score.
+
 ### Phase 3: Build reproducibility verification (optional)
 
 If Docker is available and the repo has reproducibility infrastructure, try verifying:
@@ -192,16 +332,96 @@ If deployment data is available, compare your local build hash against the deplo
 
 ### Phase 4: Cross-reference (if deployment data available)
 
+#### 4a. Commit-to-deployment tracing
+
+Can you trace from compose_hash → docker_compose_file → image reference → git commit?
+
+- Extract image references from docker_compose_file in app_compose
+- If images use tags containing commit SHAs (e.g., `v1.1.0-58ad3f2`), note the commit
+- If images are `${VAR}` references: **flag as unverifiable** (the operator controls what runs)
+- If images are pinned by `@sha256:` digest: good, but verify the digest matches
+
+**IMPORTANT:** If the image is behind a `${VAR}` in allowed_envs, you CANNOT verify what is actually running. This is a critical audit blind spot.
+
+#### 4b. Configuration comparison
+
 - Compare the deployed docker-compose from attestation data against compose files in the repo
 - Check if deployed images match what the repo would build
 - Map `allowed_envs` against actual environment variable usage in code
 - Flag any `${VAR}` image references (operator can swap the entire container without changing the code hash)
 
-### Phase 5: Generate report
+#### 4c. Upgrade transparency
+
+**Which KMS does the app use?**
+
+- **Pha KMS** (default): No public upgrade log. Trust Center shows current state only. You cannot query what was running last week. Flag this.
+- **Base KMS** (`kms-base-prod7` or similar): On-chain transparency. Query events:
+
+```bash
+# Query AppAuth contract for compose hash history
+cast call <APP_CONTRACT> "getComposeHashes()" --rpc-url https://mainnet.base.org
+
+# Query ComposeHashAdded events
+cast logs --from-block 0 --address <APP_CONTRACT> \
+  "ComposeHashAdded(bytes32)" --rpc-url https://mainnet.base.org
+
+# Check for timelock
+cast call <APP_CONTRACT> "getTimelock()" --rpc-url https://mainnet.base.org
+```
+
+If Base KMS: check how many compose hashes have been authorized historically. Multiple authorized hashes may allow downgrade attacks.
+
+**Is there a DEPLOYMENTS.md or equivalent?** Check the repo for human-readable upgrade history.
+
+**Is there a timelock?** Without a timelock, the operator can push a malicious upgrade and immediately start capturing data.
+
+#### 4d. DECISION: Upgrade transparency verdict
+
+> **Can the operator silently upgrade?** YES / NO / PARTIALLY
+>
+> KMS: [Pha / Base / unknown]
+> Timelock: [yes (N days) / no / unknown]
+> Upgrade history: [on-chain / DEPLOYMENTS.md / none]
+
+### Phase 5: Stage assessment & report
+
+#### 5a. Apply stage criteria
+
+Reference `references/devproof-stages.md` and `references/STAGE-1-CHECKLIST.md`.
+
+**Stage 1 requires ALL of these** (fail any = Stage 0):
+
+1. On-chain attestation with public upgrade log (Base KMS or equivalent)
+2. Auditable code (public source or formal verification)
+3. Reproducible code measurement (pinned images, SOURCE_DATE_EPOCH, lockfiles)
+4. Developer has no access to secrets (no fallback keys, no DEV_MODE bypass)
+5. Upgrade process with notice period (timelock)
+6. No centralized infrastructure dependency (except TEE vendor)
+7. No backdoors or debug paths
+
+If ANY of these fail, the app is Stage 0. Be precise about WHICH requirement(s) fail.
+
+If the evidence is too thin to even confirm TEE usage, classify as **Unproven**.
+
+#### 5b. Generate report
 
 Structure your report like this:
 
 ```markdown
+## One-Glance Card
+
+**Verdict:** [SAFE / PARTIAL / NOT SAFE] — [one-line reason]
+
+| Dimension | Status | Signal | Evidence |
+|-----------|--------|--------|----------|
+| Operator gap | PASS/FAIL/PARTIAL | GREEN/YELLOW/RED | [key finding] |
+| Attestation integrity | PASS/FAIL/PARTIAL | GREEN/YELLOW/RED | [compose hash, TDX verification] |
+| TLS binding | PASS/FAIL/PARTIAL | GREEN/YELLOW/RED | [cert fingerprint vs attestation] |
+| Build reproducibility | PASS/FAIL/PARTIAL | GREEN/YELLOW/RED | [pinned images, SOURCE_DATE_EPOCH] |
+| Upgrade transparency | PASS/FAIL/PARTIAL | GREEN/YELLOW/RED | [KMS type, timelock, history] |
+
+Signal key: GREEN=closed, YELLOW=partial/unknown, RED=attackable
+
 ## Executive Summary
 
 [2-3 sentences: what the app does, whether it's safe, and the key reason why or why not]
@@ -248,6 +468,9 @@ For each critical finding:
 | Builds are reproducible | | |
 | All data-handling URLs are hardcoded (not configurable) | | |
 | Hardware attestation is present (quote, RTMRs, or verified measurements) | | |
+| TDX quote cryptographically verified (dcap-qvl) | | |
+| Compose hash matches mr_config_id in quote | | |
+| Report data binding verified | | |
 | TLS certificate is bound to attestation | | |
 | TLS terminates in the TEE (not a gateway) | | |
 | No dev mode fallbacks in production | | |
@@ -286,9 +509,32 @@ Spell out exactly what this app protects against and what it doesn't. Be specifi
 
 ### To fully tie the operator's hands
 [What would need to change so the operator provably cannot interfere]
+
+## Verification Status
+
+Always end with a clear accounting of what was and wasn't verified:
+
+| Check | Status | Notes |
+|-------|--------|-------|
+| Compose hash | Verified / Not checked | [detail] |
+| TDX quote | Verified / NOT VERIFIED | [tool used or why not] |
+| TLS binding | Strong / Partial / None | [detail] |
+| Image-to-source | Traced / Unverifiable | [detail] |
+| Reproducible build | Verified / Not attempted | [detail] |
+| On-chain history | Queried / Not available | [detail] |
+
+## Recommended Next Step
+
+End with the single highest-leverage change the project should make to move closer to Stage 1. Be specific.
 ```
 
 ---
+
+## What this does NOT do
+
+- **No numerical scoring.** A reasoned verdict with evidence is more useful than "42/100".
+- **No automated pass/fail.** You reason about each dimension. A variable named `CALLBACK_ADDR` that exfiltrates data is caught by reading the code, not by regex-matching variable names containing "URL".
+- **No silent assumptions.** If you can't verify something, say so explicitly. "TDX quote: NOT VERIFIED" is an honest finding. Silently passing is not.
 
 ## Important principles
 

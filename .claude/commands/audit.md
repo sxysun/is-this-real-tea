@@ -234,6 +234,28 @@ Assess against ERC-733:
 [What would need to change]
 ```
 
+## Quick automated scan first
+
+Before deep analysis, run the automated checker:
+```bash
+./tools/audit-checks.sh /path/to/repo
+```
+
+If you have an app_id, verify the compose hash:
+```bash
+python3 tools/verify-compose-hash.py <app-id> [cluster]
+```
+
+## Reference files
+
+Consult these during the audit:
+- `references/devproof-stages.md` — stage criteria (Unproven / Stage 0 / Stage 1)
+- `references/live-checks.md` — endpoint heuristics, TLS binding classification
+- `references/case-studies.md` — patterns from real audits
+- `references/search-patterns.md` — grep patterns for common vulnerabilities
+- `references/STAGE-1-CHECKLIST.md` — ERC-733 Stage 1 requirements
+- `references/report-template.md` — one-glance card + report structure
+
 ## Important Notes
 
 - **Read the actual code**. Don't just report grep matches. Understand what each finding means.
@@ -241,4 +263,5 @@ Assess against ERC-733:
 - **Quote specific code** with file:line references.
 - **Explain attack vectors** as step-by-step scenarios a malicious operator could execute.
 - **Note what's done well**. Good security practices deserve recognition.
+- **No silent assumptions.** If you can't verify something, say so explicitly. "TDX quote: NOT VERIFIED" is an honest finding.
 - The Python tool `python -m dstack_audit` can be run first for a quick automated scan, but the real value is in your manual analysis of the source code.

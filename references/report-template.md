@@ -1,22 +1,35 @@
-# [Project Name] dstack Audit Report
+# [Project Name] — TEE Trust Report
 
 **Project**: [URL]
 **Date**: [Date]
-**Auditor**: [Name]
+**Auditor**: [Name/Agent]
+
+## One-Glance Card
+
+**Verdict:** [SAFE / PARTIAL / NOT SAFE] — [one-line reason]
+
+| Dimension | Status | Signal | Evidence |
+|-----------|--------|--------|----------|
+| Operator gap (can operator exfiltrate?) | PASS/FAIL/PARTIAL | GREEN/YELLOW/RED | [allowed_envs, ${VAR} URLs] |
+| Attestation integrity | PASS/FAIL/PARTIAL | GREEN/YELLOW/RED | [TDX quote + compose_hash match] |
+| TLS binding | PASS/FAIL/PARTIAL | GREEN/YELLOW/RED | [certFingerprint vs attestation] |
+| Build reproducibility | PASS/FAIL/PARTIAL | GREEN/YELLOW/RED | [digest pin + SOURCE_DATE_EPOCH] |
+| Upgrade transparency | PASS/FAIL/PARTIAL | GREEN/YELLOW/RED | [Base KMS / timelock / history] |
+
+Signal key: GREEN=closed, YELLOW=partial/unknown, RED=attackable
+
+## Summary
+
+| Item | Result | Notes |
+|------|--------|-------|
+| Verdict | SAFE / PARTIAL / NOT SAFE | One sentence |
+| Stage | Unproven / Stage 0 / Stage 1 candidate | Why |
+| Website | PASS / WARN / FAIL | TLS and live evidence |
+| Repo | PASS / WARN / FAIL | Auditability and reproducibility |
 
 ## Executive Summary
 
 [2-3 sentence summary of findings]
-
-| Component | Status | Notes |
-|-----------|--------|-------|
-| Configuration Control | ✅/⚠️/❌ | [Brief note] |
-| Attestation Verification | ✅/⚠️/❌ | [Brief note] |
-| Build Reproducibility | ✅/⚠️/❌ | [Brief note] |
-| Data Storage | ✅/⚠️/❌ | [Brief note] |
-| Smart Contracts | ✅/⚠️/❌/N/A | [Brief note] |
-
-**Legend**: ✅ Verified | ⚠️ Concerns | ❌ Failed | N/A Not Applicable
 
 ---
 
@@ -148,6 +161,23 @@ User → [Entry Point] → [Processing]
 
 - [Question for project team]
 - [Clarification needed]
+
+---
+
+## Verification Status
+
+| Check | Status | Notes |
+|-------|--------|-------|
+| Compose hash | Verified / Not checked | [detail] |
+| TDX quote | Verified / NOT VERIFIED | [tool used or why not] |
+| TLS binding | Strong / Partial / None | [detail] |
+| Image-to-source | Traced / Unverifiable | [detail] |
+| Reproducible build | Verified / Not attempted | [detail] |
+| On-chain history | Queried / Not available | [detail] |
+
+## Recommended Next Step
+
+[The single highest-leverage change to move closer to Stage 1. Be specific.]
 
 ---
 
