@@ -264,4 +264,3 @@ Consult these during the audit:
 - **Explain attack vectors** as step-by-step scenarios a malicious operator could execute.
 - **Note what's done well**. Good security practices deserve recognition.
 - **No silent assumptions.** If you can't verify something, say so explicitly. "TDX quote: NOT VERIFIED" is an honest finding.
-- The Python tool `python -m dstack_audit` can be run first for a quick automated scan, but the real value is in your manual analysis of the source code.

@@ -129,19 +129,6 @@ The agent follows a 5-phase methodology with decision gates, produces a one-glan
 python3 tools/verify-compose-hash.py <app-id> [cluster]
 ```
 
-### Python CLI
-
-```bash
-python -m dstack_audit <repo_url> <website_url> -v
-```
-
-### Tests
-
-```bash
-pytest tests/ -v              # 52 cached tests, no network
-pytest tests/ -v --run-live   # live tests against real deployments
-```
-
 ## Repo structure
 
 ```
@@ -159,11 +146,9 @@ is-this-real-tea/
 │   ├── report-template.md            # One-glance card + report structure
 │   ├── STAGE-1-CHECKLIST.md          # ERC-733 Stage 1 requirements
 │   └── erc733-summary.md             # ERC-733 security stages framework
-├── tools/
-│   ├── verify-compose-hash.py        # Fetch 8090 metadata, verify compose hash
-│   └── audit-checks.sh               # Automated vulnerability scan
-├── dstack_audit/                     # Python CLI tool
-└── tests/                            # Test suite
+└── tools/
+    ├── verify-compose-hash.py        # Fetch 8090 metadata, verify compose hash
+    └── audit-checks.sh               # Automated vulnerability scan
 ```
 
 ## References
