@@ -37,6 +37,80 @@ If any of these fail, **the operator can still steal user data**. Report what yo
 
 ---
 
+## How to think about trust
+
+Before checking anything, understand what you're actually verifying — and what you're not.
+
+### What the compose hash actually covers
+
+The compose hash is a SHA-256 of the `docker-compose.yml` file text and its deploy-time settings. That's it. It does **not** cover:
+- The contents of Docker images referenced in the compose file
+- The dependencies installed inside those images
+- Runtime behavior triggered by environment variables
+- Data that leaves the TEE after processing
+- DNS resolution of hostnames in the compose file
+- Sidecar processes, init containers, or pre-launch scripts (these are part of `app_compose` but easy to overlook)
+
+When you see "compose hash matches," that means the *configuration file* is what was attested. It says nothing about whether the *code that configuration points to* is safe.
+
+### The chain of trust has many links
+
+Trace the full chain. Each link can break independently:
+
+```
+compose_hash
+  → docker_compose_file (text of the config)
+    → image reference (tag or digest)
+      → image contents (layers, binaries, scripts)
+        → dependencies (pip packages, npm modules, system libraries)
+          → runtime behavior (what the code actually does when executed)
+            → data destinations (where user data ends up)
+```
+
+Most audits only check the first link (compose hash matches). A thorough audit traces every link. Ask at each step: "Who controls this? Can the operator influence it without changing the compose hash?"
+
+### Every channel the operator can influence
+
+Environment variables (`allowed_envs`) are the obvious one. But operators can also influence:
+- **Image selection**: `${IMAGE}` in docker-compose means the operator picks what code runs
+- **Pre-launch scripts**: code that runs before the container starts, outside the image
+- **Runtime config files**: `.env`, YAML, TOML files mounted or generated at startup
+- **Database connection strings**: if the operator controls where the database lives, they control the data
+- **DNS resolution**: the operator can point hostnames to their own servers
+- **Package registries**: custom pip/npm registries configured via env var (`--extra-index-url`, `NPM_CONFIG_REGISTRY`)
+- **Mounted volumes**: data shared between containers or from the host
+- **Sidecar containers**: other containers in the compose that share the network namespace
+
+### Every channel data can leave the TEE
+
+HTTP requests to external services are the obvious exfiltration path. But data can also leave through:
+- **DNS queries**: data encoded in DNS lookups (`sensitive-data.attacker.com` leaks data to whoever controls the DNS resolver or the target domain)
+- **Database writes**: data stored "inside the TEE" but the database replicates to an external server, or the database connection string points outside the TEE
+- **Logging/analytics services**: PostHog, Sentry, Datadog, custom logging — if the endpoint is configurable, user data in error messages or analytics events is exfiltrable
+- **Error responses**: sensitive data leaked through HTTP headers, error messages, or stack traces sent to external error tracking
+- **Timing side channels**: information leaked through response timing differences (less likely in practice but worth noting for high-security apps)
+- **Response metadata**: HTTP headers, status codes, or response sizes that encode information about user data
+
+### "Attested" does not mean "safe"
+
+Attestation proves the configuration hash. It proves the hardware is real. It proves the code hasn't been tampered with *at the boot level*. It does **not** prove:
+- The code is honest (the hardware will faithfully execute exfiltration if the code tells it to)
+- The dependencies are safe (a malicious npm package inside a correctly-attested image still runs)
+- The operator can't influence behavior (env vars, DNS, image selection are outside the hash)
+- The data stays protected after processing (the TEE protects memory, not network traffic)
+
+### The supply chain question
+
+Who built the image? If the operator controls the CI pipeline:
+- A "correct" image digest just means the operator's build is consistent, not that the code is safe
+- Trace the full path: source code → build system → container registry → deployment
+- If the repo is public but the build pipeline is private, you can't verify the image matches the source
+- Even with reproducible builds, verify that the *source* is what was audited, not just that the build is deterministic
+
+**Use this mental model throughout the audit.** When you find something — an env var, a URL, a dependency — ask: "Where does this sit in the chain of trust? Who controls it? What could go wrong?" If you can reason from these principles, you'll catch vulnerabilities that aren't on any checklist.
+
+---
+
 ## Full audit methodology
 
 ### Phase 1: Gather attestation data
@@ -240,6 +314,29 @@ Attack:
 4. Users see valid attestation but their data is being stolen
 ```
 
+#### 2a-extra. Beyond env vars: other operator influence channels
+
+Env vars are the most common attack surface, but not the only one. Also check:
+
+**Dynamic code loading**: Search for patterns that let the operator cause the app to execute code from a source they control:
+- JavaScript/TypeScript: `import()`, `require()` with variable paths, `eval()`, `new Function()`, `vm.runInContext()`
+- Python: `importlib.import_module()`, `exec()`, `eval()`, `subprocess`, `os.system()`, `__import__()`
+- General: `dlopen`, WASM loading, plugin systems, webhook handlers that execute payloads
+
+If any of these load code from a path or URL controlled by an env var, the operator can inject arbitrary code.
+
+**Configuration files outside the compose hash**: Look for `.env` files, YAML/TOML/JSON config files that are read at runtime. If these are generated by a pre-launch script or mounted from outside the image, the operator controls them even though the compose hash is valid.
+
+**Database as exfiltration vector**: If the database connection string is in `allowed_envs`, the operator controls where data is stored. Check:
+- `DATABASE_URL`, `POSTGRES_*`, `MONGO_*`, `REDIS_URL` in allowed_envs
+- Whether the database supports replication to external servers
+- Whether connection strings use hostnames (resolvable by operator-controlled DNS) vs hardcoded IPs
+
+**Dependency confusion / supply chain**: Check whether package installation happens at runtime (not just build time):
+- `pip install` or `npm install` in entrypoint scripts or pre-launch scripts
+- Custom registries configured via env var (`PIP_EXTRA_INDEX_URL`, `NPM_CONFIG_REGISTRY`)
+- Unpinned dependencies pulled at container startup
+
 #### 2a-ii. Check docker_compose_file for ${VAR} patterns
 
 If you have the deployed `docker_compose_file` (from app_compose via 8090 metadata), search it:
@@ -292,6 +389,14 @@ Check:
 - Data sent to services outside the TEE is no longer protected by the hardware -- note this explicitly
 - Check if sensitive data is encrypted before leaving the TEE boundary
 - Map every external service that receives user data
+
+**Non-obvious exfiltration channels** — also check these:
+
+- **DNS exfiltration**: If the app resolves hostnames dynamically (especially based on user input or configurable domains), data can be encoded in DNS queries. The DNS resolver sees every lookup. Search for DNS resolution calls with variable hostnames.
+- **Logging and analytics**: Search for PostHog, Sentry, Datadog, LogRocket, Mixpanel, or custom logging. If the analytics endpoint is configurable via env var, user data in logged events (error messages, request bodies, user actions) is exfiltrable. Even hardcoded analytics endpoints leak data to third parties — note this.
+- **Error reporting**: Stack traces and error messages often contain user data (input that caused the error, request context). If these go to an external error tracking service, that's a data leak. Check `Sentry.init()`, error middleware, unhandled exception handlers.
+- **Response metadata leakage**: HTTP headers, detailed error messages, or timing differences can leak information about user data to network observers outside the TEE. Less critical than direct exfiltration but worth noting.
+- **Database replication**: Data stored in a database "inside the TEE" may not stay there. Check if the database configuration allows replication, if the connection string is operator-controlled, or if the database service runs outside the TEE (common with managed databases like RDS).
 
 #### 2e. Can the operator push silent updates?
 
@@ -495,7 +600,11 @@ Spell out exactly what this app protects against and what it doesn't. Be specifi
 - "Anyone who reads the source code can decrypt user cookies, because the fallback encryption key is hardcoded in the repo (file:line)."
 
 ### What can't be verified
-[List things you couldn't check and why. Examples:]
+[List things you couldn't check and why. ALWAYS include these categories:]
+- **Dependency supply chain**: "Dependencies inside the image were not individually audited. A compromised transitive dependency would not be caught by this review."
+- **Runtime-conditional behavior**: "Code paths triggered only by specific operator-controlled inputs may exist but not be visible in static analysis."
+- **Build pipeline integrity**: "Whether the deployed image was built from the audited source code [was / was not] verified. [Detail]."
+- [Plus any audit-specific gaps. Examples:]
 - "Could not verify TLS binding because the attestation endpoint was unreachable"
 - "Could not check if the deployed image matches the source because no deployment URL was provided"
 
@@ -523,6 +632,10 @@ Always end with a clear accounting of what was and wasn't verified:
 | Reproducible build | Verified / Not attempted | [detail] |
 | On-chain history | Queried / Not available | [detail] |
 
+## Audit Scope & Limitations
+
+> This is a code-level trust model audit, not a penetration test. It checks whether the operator can structurally redirect or access user data. It does NOT audit transitive dependencies, test for memory corruption, or guarantee the absence of all possible vulnerabilities. A "SAFE" verdict means no operator gap was found in the audited code — not that exploitation is provably impossible.
+
 ## Recommended Next Step
 
 End with the single highest-leverage change the project should make to move closer to Stage 1. Be specific.
@@ -535,6 +648,17 @@ End with the single highest-leverage change the project should make to move clos
 - **No numerical scoring.** A reasoned verdict with evidence is more useful than "42/100".
 - **No automated pass/fail.** You reason about each dimension. A variable named `CALLBACK_ADDR` that exfiltrates data is caught by reading the code, not by regex-matching variable names containing "URL".
 - **No silent assumptions.** If you can't verify something, say so explicitly. "TDX quote: NOT VERIFIED" is an honest finding. Silently passing is not.
+
+## Limits of this audit
+
+Be explicit in every report about what this audit *cannot* catch. The report consumer needs to understand the boundaries.
+
+- **This is a code-level trust model audit, not a penetration test.** It identifies structural gaps in how the operator can influence the app. It does not attempt to exploit those gaps, test for memory corruption, or probe running services.
+- **Supply chain attacks in dependencies are not fully auditable by reading application code.** A malicious transitive dependency (e.g., a compromised npm package three levels deep) would not be caught. Dependency auditing requires specialized tools and is out of scope.
+- **Runtime behavior triggered by operator-controlled inputs may not be visible in static analysis.** If the operator sets `DEBUG=true` and that triggers a code path that exfiltrates data, this audit will try to find it — but complex conditional logic or obfuscated paths may be missed.
+- **The build pipeline is trusted if the image digest matches.** If the operator controls the CI/CD system, a matching digest means the build is consistent, not that the source is safe. This audit checks the *source code*, not the build infrastructure.
+- **A "SAFE" verdict means "no operator gap found in the audited code."** It does NOT mean "provably impossible to exploit." No single-pass code review can provide that guarantee. Explicitly state this in every report.
+- **Interactions between components may create vulnerabilities invisible to single-service analysis.** If the app has multiple containers, the interactions between them (shared networks, volumes, service discovery) are checked at the compose level but may have subtleties that require integration testing to catch.
 
 ## Important principles
 
